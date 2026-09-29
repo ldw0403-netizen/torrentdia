@@ -1,64 +1,146 @@
-name: TorrentDia URL Finder
+#!/usr/bin/env python3
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"
+import json
+import re
+import sys
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
-permissions:
-  contents: write
+TELEGRAPH_URL = "https://telegra.ph/torrentdia-url-06-13"
 
-jobs:
-  find-url:
-    runs-on: ubuntu-latest
+DOMAIN_PATTERN = re.compile(
+    r"https?://(?:www\.)?([a-zA-Z0-9-]+)\.torrentdia\.org"
+    r"(?::\d+)?(?:/[^\s\"'<>)\]]*)?",
+    re.IGNORECASE
+)
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+HOST_PATTERN = re.compile(
+    r"\b([a-zA-Z0-9-]+)\.torrentdia\.org\b",
+    re.IGNORECASE
+)
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
 
-      - name: Find latest TorrentDia URL
-        run: |
-          python parser.py > finder_output.txt
-          cat finder_output.txt
+def fetch_telegraph():
+    request = Request(
+        TELEGRAPH_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
 
-          URL=$(grep '^LATEST_URL=' finder_output.txt | cut -d= -f2-)
+    with urlopen(request, timeout=10) as response:
+        return response.read().decode("utf-8", errors="ignore")
 
-          if [ -z "$URL" ]; then
-            echo "No valid TorrentDia URL found."
-            exit 1
-          fi
 
-          python - "$URL" <<'PY'
-          import json
-          import sys
+def extract_candidates(html):
+    candidates = []
 
-          url = sys.argv[1]
+    for match in DOMAIN_PATTERN.finditer(html):
+        url = match.group(0).rstrip("/")
+        candidates.append(url)
 
-          data = {
-              "success": True,
-              "url": url
-          }
+    for match in HOST_PATTERN.finditer(html):
+        url = "https://" + match.group(1) + ".torrentdia.org"
+        candidates.append(url)
 
-          with open("result.json", "w", encoding="utf-8") as f:
-              json.dump(data, f, ensure_ascii=False, indent=2)
-              f.write("\n")
-          PY
+    result = []
 
-      - name: Update result.json
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    for url in candidates:
+        if url not in result:
+            result.append(url)
 
-          git add result.json
+    return result
 
-          if git diff --cached --quiet; then
-            echo "No URL change."
-          else
-            git commit -m "Update latest TorrentDia URL"
-            git push
-          fi
+
+def check_url(url):
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        },
+        method="GET"
+    )
+
+    try:
+        with urlopen(request, timeout=6) as response:
+            status = response.getcode()
+
+            return {
+                "url": url,
+                "valid": 200 <= status < 400,
+                "status": status
+            }
+
+    except HTTPError as error:
+        return {
+            "url": url,
+            "valid": False,
+            "status": error.code
+        }
+
+    except (URLError, TimeoutError, OSError):
+        return {
+            "url": url,
+            "valid": False,
+            "status": None
+        }
+
+
+def find_latest_url():
+    html = fetch_telegraph()
+    candidates = extract_candidates(html)
+
+    if not candidates:
+        raise RuntimeError(
+            "Telegraph에서 TorrentDia 주소를 찾지 못했습니다."
+        )
+
+    results = []
+
+    for url in candidates:
+        result = check_url(url)
+        results.append(result)
+
+        if result["valid"]:
+            return {
+                "success": True,
+                "source": TELEGRAPH_URL,
+                "url": url,
+                "candidates": results
+            }
+
+    return {
+        "success": False,
+        "source": TELEGRAPH_URL,
+        "url": None,
+        "candidates": results
+    }
+
+
+def main():
+    try:
+        result = find_latest_url()
+
+        print(json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2
+        ))
+
+        if result["success"]:
+            print()
+            print("LATEST_URL=" + result["url"])
+
+    except Exception as error:
+        print(json.dumps({
+            "success": False,
+            "source": TELEGRAPH_URL,
+            "url": None,
+            "error": str(error)
+        }, ensure_ascii=False, indent=2))
+
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
