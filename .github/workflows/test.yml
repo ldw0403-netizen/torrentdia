@@ -1,11 +1,15 @@
-name: TorrentDia URL Finder Test
+name: TorrentDia URL Finder
 
 on:
-  push:
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: write
 
 jobs:
-  test:
+  find-url:
     runs-on: ubuntu-latest
 
     steps:
@@ -17,5 +21,44 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run URL Finder
-        run: python parser.py
+      - name: Find latest TorrentDia URL
+        run: |
+          python parser.py > finder_output.txt
+          cat finder_output.txt
+
+          URL=$(grep '^LATEST_URL=' finder_output.txt | cut -d= -f2-)
+
+          if [ -z "$URL" ]; then
+            echo "No valid TorrentDia URL found."
+            exit 1
+          fi
+
+          python - "$URL" <<'PY'
+          import json
+          import sys
+
+          url = sys.argv[1]
+
+          data = {
+              "success": True,
+              "url": url
+          }
+
+          with open("result.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          PY
+
+      - name: Update result.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add result.json
+
+          if git diff --cached --quiet; then
+            echo "No URL change."
+          else
+            git commit -m "Update latest TorrentDia URL"
+            git push
+          fi
